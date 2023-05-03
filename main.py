@@ -1,6 +1,5 @@
 import os
 import logging
-# import requests
 from pathlib import Path
 from pprint import pprint
 from dotenv import load_dotenv
@@ -11,11 +10,14 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 
 
 from database import create_db_connection
+from messages import start_message
 
 
 # TODO
 # Add conversationflow for facilitators
-# 
+# Linking supabase 
+# fix logging
+# set reminders for those who never complete
 
 
 
@@ -37,7 +39,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # mastermind flow
-ATTENDANCE, CONFIRMATION, AVAILABLE, UNAVAILABLE, UNSURE, QUESTIONNAIRE, COMPLETE, ALL_UNAVAILABLE = range(8)
+ATTENDANCE, CONFIRMATION, AVAILABLE, UNAVAILABLE, UNSURE, QUESTIONNAIRE, COMPLETE = range(7)
 END = ConversationHandler.END
 
 # help flow
@@ -45,9 +47,6 @@ HELP_CONFIRMATION1, HELP_CONFIRMATION2 = range(2)
 
 # verification flow
 CHECK_EMAIL = range(1)
-
-from messages import start_message
-
 
 class The100ClubBot:
     def __init__(self):
@@ -165,9 +164,11 @@ Here are the details for your mastermind session:
 Date: {person['mastermind_info']['date']}
 Time: {person['mastermind_info']['time']}
 Location: {person['mastermind_info']['location']}
+
+#mastermind
 """
             
-            keyboard = [['Will be there', 'Unavailable', 'Unsure']]
+            keyboard = [['Will be there', 'Unavailable']]
 
             
             await context.bot.send_message(
@@ -186,15 +187,21 @@ Location: {person['mastermind_info']['location']}
 
             return END
 
-    async def update_availability(self, status):
+    async def update_availability(self, status, chat_id, challenge=None, context=None, session_date=None):
+
         connection = create_db_connection(host, user, password, database)
         cursor = connection.cursor()
 
-        cursor.execute(f'UPDATE ')
-        response = cursor.fetchone()   
+        cursor.execute(f'SELECT id FROM messaging_member WHERE chat_id="{chat_id}"')
+        response = cursor.fetchone()
+        person_id = response[0]
 
+        cursor.execute(f'INSERT INTO messaging_attendancequestionnaire (session_status, challenge, context, session_date, person_id) VALUES ("{status}", "{challenge}", "{context}", "{session_date}", "{person_id}")')
+        connection.commit()
+        connection.close()
 
-
+        # cursor.execute(f'UPDATE messaging_questionnaire SET status="{status}", challenge="{challenge}", context="{context}", session_date="{session_date}" WHERE')
+        # response = cursor.fetchone()   
 
     async def available(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:    
         attending_message = \
@@ -209,7 +216,17 @@ First, state your challenge / problem in one sentence:
             text=attending_message, 
         )
 
-        await self.update_availability(update.message.text)
+        person = context.user_data['person']
+
+        questionnaire = {
+            'challenge': '',
+            'context': '',
+            'session_date': person['mastermind_info']['date'],
+            'session_status': 'WBT'
+        }
+
+        person['questionnaire'] = questionnaire
+        context.user_data['person'] = person
 
         return QUESTIONNAIRE
 
@@ -221,14 +238,26 @@ First, state your challenge / problem in one sentence:
 
             await context.bot.send_message(
                 chat_id=update.effective_chat.id, 
-                text="Checking other available dates...", 
+                text="Checking other available dates...\n\nContinue by pressing any key.", 
             )
 
             return ATTENDANCE
         
         else:
 
-            return ALL_UNAVAILABLE
+            await self.update_availability('UNA', update.effective_chat.id)
+
+            mastermind_unavailable = \
+f"""
+Unfortunately, we are unable to find other dates. Please keep a lookout for next month's session or request a group change if this issue is recurring.
+"""
+
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id, 
+                text=mastermind_unavailable, 
+            )   
+
+            return END  
 
     async def unsure(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         
@@ -239,7 +268,7 @@ First, state your challenge / problem in one sentence:
 
 
     async def questionnaire(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        person = context.user_data['person']
+        context.user_data['person']['questionnaire']['challenge'] = update.message.text
 
         mastermind_questionnaire_message = \
     f"""
@@ -260,25 +289,48 @@ First, state your challenge / problem in one sentence:
     Got it, will be sharing this with the facilitator for the session. See you there!
     """
         
+        context.user_data['person']['questionnaire']['context'] = update.message.text        
+        
+        await self.update_availability(
+            'WBT', 
+            update.effective_chat.id, 
+            session_date=context.user_data['person']['questionnaire']['session_date'], 
+            challenge=context.user_data['person']['questionnaire']['challenge'], 
+            context=context.user_data['person']['questionnaire']['context'])
+
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=mastermind_end_message
         )
 
+        # inform facilitator
+        await self.inform_facilitator(context)
+
         return END
 
-    async def all_unavailable(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        mastermind_unavailable = \
-f"""
-Unfortunately, we are unable to find other dates. Please keep a lookout for next month's session or request a group change if this issue is recurring.
-"""
+    async def inform_facilitator(self, context):
+        person = context.user_data['person']
+        group_name = person['mastermind_info']['group_name']
+
+        connection = create_db_connection(host, user, password, database)
+        cursor = connection.cursor()
+
+        cursor.execute(f'SELECT facilitator FROM messaging_mastermindgroup WHERE group_name="{group_name}"')
+        response = cursor.fetchone()
+        
+        facilitator_chat_id = response[0]
 
         await context.bot.send_message(
-            chat_id=update.effective_chat.id, 
-            text=mastermind_unavailable, 
-        )   
+            chat_id=facilitator_chat_id, 
+            text=f"""
+{person['contact_info']['first_name']} just checked in.
 
-        return END  
+Status: {person['questionnaire']['session_status']}
+
+#attendance
+            """, 
+        )
+
 
     async def verify(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get identifier from user
@@ -311,7 +363,7 @@ Unfortunately, we are unable to find other dates. Please keep a lookout for next
 
             await context.bot.send_message(
                 chat_id=update.effective_chat.id, 
-                text=f"{first_name}, your email has been verified. Feel free to use any of the features in this bot!",
+                text=f"{first_name}, your email has been verified. Feel free to use any of the features in this bot! \n\n/mastermind",
             )
 
             chat_id = update.effective_chat.id
@@ -384,7 +436,7 @@ Unfortunately, we are unable to find other dates. Please keep a lookout for next
         mastermind_handler = ConversationHandler(
             entry_points=[CommandHandler('mastermind', self.mastermind)],
             states={
-                ATTENDANCE: [MessageHandler(filters.TEXT & (~filters.COMMAND), self.attendance)],
+                ATTENDANCE: [MessageHandler(filters.TEXT & ~(filters.COMMAND | filters.Regex("^q$")), self.attendance)],
                 CONFIRMATION: [
                     MessageHandler(
                         filters.Regex("^Will be there$"), 
@@ -396,10 +448,8 @@ Unfortunately, we are unable to find other dates. Please keep a lookout for next
                         filters.Regex("^Unsure$"),
                         self.unsure)
                 ],
-
                 QUESTIONNAIRE: [MessageHandler(filters.TEXT & (~filters.COMMAND), self.questionnaire)],
                 COMPLETE: [MessageHandler(filters.TEXT & (~filters.COMMAND), self.complete)],
-                ALL_UNAVAILABLE: [MessageHandler(filters.TEXT & (~filters.COMMAND), self.all_unavailable)],
             },
             fallbacks=[CommandHandler('cancel', self.cancel)],
             allow_reentry=True
@@ -423,7 +473,7 @@ Unfortunately, we are unable to find other dates. Please keep a lookout for next
         )
         
         start_handler = CommandHandler('start', self.start)
-        echo_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self.echo)
+        echo_handler = MessageHandler(filters.TEXT & ~(filters.COMMAND | filters.Regex('^q$')), self.echo)
 
         self.application.add_handler(start_handler)
         self.application.add_handler(mastermind_handler)
