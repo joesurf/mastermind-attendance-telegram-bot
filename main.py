@@ -3,13 +3,15 @@ import logging
 from pathlib import Path
 from pprint import pprint
 from dotenv import load_dotenv
+from simple_colors import black
 
 
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, ConversationHandler, filters
 
 
-from database import create_db_connection
+from database import read_one_query, read_all_query, execute_query
 from messages import start_message
 
 
@@ -55,37 +57,6 @@ class The100ClubBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=update.effective_chat.id, text=start_message)
 
-    async def mastermind(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-        chat_id = update.effective_chat.id 
-
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id, 
-            text='Please wait while we verify your status...', 
-        )
-
-        person = await self.information(chat_id)
-        context.user_data['person'] = person
-
-        if person:
-            keyboard = [['Confirm attendance']]
-
-            await context.bot.send_message(chat_id=update.effective_chat.id, text='What do you want to do?',
-                                        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)) 
-            
-            return ATTENDANCE
-        
-        else:
-
-            bot_mastermind_unverified = \
-f"""
-Hello there, it seems that you haven't been verified. Click any of the options below and oour team will respond shortly.
-
-Please verify before continuing: /verify 
-"""
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_mastermind_unverified)
-
-            return END
 
     async def information(self, chat_id):
         person = {
@@ -97,28 +68,19 @@ Please verify before continuing: /verify
             'invited': False
         }
 
-        connection = create_db_connection(host, user, password, database)
-        cursor = connection.cursor()
-
-
-        cursor.execute(f'SELECT person_id, mastermind_group_id FROM messaging_member WHERE chat_id="{chat_id}"')
-        response = cursor.fetchone()
+        response = read_one_query(f'SELECT person_id, mastermind_group_id FROM messaging_member WHERE chat_id="{chat_id}"')
 
         if response:
             person_id = response[0]
             mastermind_group_id = response[1]
 
-            cursor.execute(f'SELECT first_name, email FROM auth_user WHERE id="{person_id}"')
-            response = cursor.fetchone()
+            response = read_one_query(f'SELECT first_name, email FROM auth_user WHERE id="{person_id}"')
 
             if response:
                 person['contact_info']['first_name'] = response[0]
                 person['contact_info']['email'] = response[1]
 
             person['mastermind_group_id'] = mastermind_group_id
-
-            connection.commit()
-            connection.close()
 
             return person
 
@@ -128,28 +90,60 @@ Please verify before continuing: /verify
 
 
     async def attendance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        person = context.user_data['person']
 
-        connection = create_db_connection(host, user, password, database)
-        cursor = connection.cursor()
+        # verify person
+        
+
+
+        if 'person' not in context.user_data:
+
+            chat_id = update.effective_chat.id 
+
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id, 
+                text='Please wait while we verify your status...', 
+            )
+
+            person = await self.information(chat_id)
+            context.user_data['person'] = person
+
+        else:
+            person = context.user_data['person']
+
+
+        if not person:
+
+            bot_mastermind_unverified = \
+f"""
+Hello there, it seems that you haven't been verified. Click any of the options below and oour team will respond shortly.
+
+Please verify before continuing: /verify 
+"""
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=bot_mastermind_unverified)
+
+            return END
+
+        # purpose: give attendance options
+
+        person = context.user_data['person']
 
         if person['invited']:
             other_group = person['mastermind_info']['similar_groups']
-            cursor.execute(f'SELECT group_name, session_datetime, session_location, similar_groups FROM messaging_mastermindgroup WHERE group_name="{other_group}"')
-            response = cursor.fetchone()            
+            response = read_one_query(f'SELECT group_name, session_datetime, session_location, similar_groups, calendar_link FROM messaging_mastermindgroup WHERE group_name="{other_group}"')
         else:
             mastermind_group_id = person['mastermind_group_id']
-            cursor.execute(f'SELECT group_name, session_datetime, session_location, similar_groups FROM messaging_mastermindgroup WHERE id="{mastermind_group_id}"')
-            response = cursor.fetchone()
+            response = read_one_query(f'SELECT group_name, session_datetime, session_location, similar_groups, calendar_link FROM messaging_mastermindgroup WHERE id="{mastermind_group_id}"')
 
 
         if response:
             mastermind_info = {
                 'group_name': response[0],
                 'date': response[1].strftime('%A, %d %B %Y'),
-                'time': response[1].strftime('%I:%M %p') + ' onwards',
+                'time': response[1].strftime('%I:%-M %p') + ' onwards',
                 'location': response[2],
-                'similar_groups': response[3]
+                'similar_groups': response[3],
+                'calendar_link': response[4],
+                'full_date': response[1]
             },
 
             person['mastermind_info'] = mastermind_info[0] # for some reason this is in a tuple
@@ -158,14 +152,18 @@ Please verify before continuing: /verify
 f"""
 Hello {person['contact_info']['first_name']}, 
 
-{person['mastermind_info']['group_name']}
+Group: {person['mastermind_info']['group_name']}
 
 Here are the details for your mastermind session:
 Date: {person['mastermind_info']['date']}
 Time: {person['mastermind_info']['time']}
 Location: {person['mastermind_info']['location']}
 
-#mastermind
+The details are already in your calendar. Otherwise, click this link: <a href='{person['mastermind_info']['calendar_link']}'>Google Calendar Invite Link</a>
+
+P.s. For members, go for your core group session as much as possible. Indicate your availability as of now - if you're unsure, you may update your availability again in the future by entering /mastermind.
+
+#attendance
 """
             
             keyboard = [['Will be there', 'Unavailable']]
@@ -174,7 +172,8 @@ Location: {person['mastermind_info']['location']}
             await context.bot.send_message(
                 chat_id=update.effective_chat.id, 
                 text=bot_mastermind_verified, 
-                reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, input_field_placeholder='Can you make it?')
+                reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, input_field_placeholder='Can you make it?'),
+                parse_mode=ParseMode.HTML
             )
 
             return CONFIRMATION
@@ -187,21 +186,44 @@ Location: {person['mastermind_info']['location']}
 
             return END
 
-    async def update_availability(self, status, chat_id, challenge=None, context=None, session_date=None):
+    async def update_availability(self, status, chat_id, challenge=None, context=None, session_date=None, telegram_context=None):
 
-        connection = create_db_connection(host, user, password, database)
-        cursor = connection.cursor()
 
-        cursor.execute(f'SELECT id FROM messaging_member WHERE chat_id="{chat_id}"')
-        response = cursor.fetchone()
+        response = read_one_query(f'SELECT id FROM messaging_member WHERE chat_id="{chat_id}"')
         person_id = response[0]
 
-        cursor.execute(f'INSERT INTO messaging_attendancequestionnaire (session_status, challenge, context, session_date, person_id) VALUES ("{status}", "{challenge}", "{context}", "{session_date}", "{person_id}")')
-        connection.commit()
-        connection.close()
+        responses = read_all_query(f'SELECT session_date FROM messaging_attendancequestionnaire WHERE person_id="{person_id}"')
 
-        # cursor.execute(f'UPDATE messaging_questionnaire SET status="{status}", challenge="{challenge}", context="{context}", session_date="{session_date}" WHERE')
-        # response = cursor.fetchone()   
+        existing_questionnaire_date = None
+        update = False
+
+        if responses:
+            for response in responses:
+                if session_date.month == response[0].month:
+                    existing_questionnaire_date = response[0]
+
+        if existing_questionnaire_date:    
+            update = True    
+            execute_query(f'UPDATE messaging_attendancequestionnaire SET session_status="{status}", challenge="{challenge}", context="{context}", session_date="{session_date.date()}" WHERE person_id="{person_id}" AND session_date="{existing_questionnaire_date}"')
+
+        else:
+            execute_query(f'INSERT INTO messaging_attendancequestionnaire (session_status, challenge, context, session_date, person_id) VALUES ("{status}", "{challenge}", "{context}", "{session_date}", "{person_id}")')
+    
+        person = telegram_context.user_data['person']
+        group_name = person['mastermind_info']['group_name']
+
+        await telegram_context.bot.send_message(
+            chat_id='797737829', 
+            text=f"""
+{person['contact_info']['first_name']} just checked in.
+
+Status: {status}
+Challenge: {challenge}
+Context: {context}
+
+#attendance #{group_name} #{'update' if update else 'new'}
+            """, 
+        )
 
     async def available(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:    
         attending_message = \
@@ -209,19 +231,24 @@ f"""
 Awesome, before you go off, help us complete this questionnaire in preparation for the session.
 
 First, state your challenge / problem in one sentence:
+
+_E.g. I'm facing difficulty using email marketing to target my audience_
 """
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id, 
-            text=attending_message, 
+            text=attending_message,
+            parse_mode=ParseMode.MARKDOWN 
         )
+
+        # TODO initial update of availability
 
         person = context.user_data['person']
 
         questionnaire = {
             'challenge': '',
             'context': '',
-            'session_date': person['mastermind_info']['date'],
+            'session_date': person['mastermind_info']['full_date'],
             'session_status': 'WBT'
         }
 
@@ -233,19 +260,29 @@ First, state your challenge / problem in one sentence:
     async def unavailable(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         person = context.user_data['person']
 
+        await self.update_availability(
+            'UNA', 
+            update.effective_chat.id,
+            session_date=context.user_data['person']['mastermind_info']['full_date'], 
+            telegram_context=context
+        )
+
         if person['mastermind_info']['similar_groups'] and not person['invited']:
             person['invited'] = True
 
             await context.bot.send_message(
                 chat_id=update.effective_chat.id, 
-                text="Checking other available dates...\n\nContinue by pressing any key.", 
+                text="Checking other available dates...", 
+            )
+
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id, 
+                text="Before that, let us know why you can't make it for your core group session so we can plan better:", 
             )
 
             return ATTENDANCE
         
         else:
-
-            await self.update_availability('UNA', update.effective_chat.id)
 
             mastermind_unavailable = \
 f"""
@@ -271,13 +308,16 @@ Unfortunately, we are unable to find other dates. Please keep a lookout for next
         context.user_data['person']['questionnaire']['challenge'] = update.message.text
 
         mastermind_questionnaire_message = \
-    f"""
-    Next, share with us some context about this challenge:
-    """
+f"""
+Next, share with us some context about this challenge:
+
+_E.g. I have tried other forms of marketing to raise awareness of my product with the goal of converting sales but all have failed. Recently I tried email due to suggestions from others but I'm not sure how to work it best_
+"""
         
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=mastermind_questionnaire_message
+            text=mastermind_questionnaire_message,
+            parse_mode=ParseMode.MARKDOWN 
         )      
 
         return COMPLETE
@@ -285,52 +325,26 @@ Unfortunately, we are unable to find other dates. Please keep a lookout for next
 
     async def complete(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         mastermind_end_message = \
-    f"""
-    Got it, will be sharing this with the facilitator for the session. See you there!
-    """
+f"""
+Got it, will be sharing this with the facilitator for the session. See you there!
+"""
         
         context.user_data['person']['questionnaire']['context'] = update.message.text        
         
         await self.update_availability(
             'WBT', 
             update.effective_chat.id, 
-            session_date=context.user_data['person']['questionnaire']['session_date'], 
+            session_date=context.user_data['person']['mastermind_info']['full_date'], 
             challenge=context.user_data['person']['questionnaire']['challenge'], 
-            context=context.user_data['person']['questionnaire']['context'])
+            context=context.user_data['person']['questionnaire']['context'],
+            telegram_context=context)
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=mastermind_end_message
         )
 
-        # inform facilitator
-        await self.inform_facilitator(context)
-
         return END
-
-    async def inform_facilitator(self, context):
-        person = context.user_data['person']
-        group_name = person['mastermind_info']['group_name']
-
-        connection = create_db_connection(host, user, password, database)
-        cursor = connection.cursor()
-
-        cursor.execute(f'SELECT facilitator FROM messaging_mastermindgroup WHERE group_name="{group_name}"')
-        response = cursor.fetchone()
-        
-        facilitator_chat_id = response[0]
-
-        await context.bot.send_message(
-            chat_id=facilitator_chat_id, 
-            text=f"""
-{person['contact_info']['first_name']} just checked in.
-
-Status: {person['questionnaire']['session_status']}
-
-#attendance
-            """, 
-        )
-
 
     async def verify(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get identifier from user
@@ -351,11 +365,7 @@ Status: {person['questionnaire']['session_status']}
             text="Checking email...",
         )
 
-        connection = create_db_connection(host, user, password, database)
-        cursor = connection.cursor()
-
-        cursor.execute(f'SELECT first_name, id FROM auth_user WHERE email="{email}"')
-        response = cursor.fetchone()
+        response = read_one_query(f'SELECT first_name, id FROM auth_user WHERE email="{email}"')
 
         if response:
             first_name = response[0]
@@ -368,9 +378,7 @@ Status: {person['questionnaire']['session_status']}
 
             chat_id = update.effective_chat.id
 
-            cursor.execute(f'UPDATE messaging_member SET chat_id="{chat_id}" WHERE person_id="{person_id}"')
-            connection.commit()
-            connection.close()
+            execute_query(f'UPDATE messaging_member SET chat_id="{chat_id}" WHERE person_id="{person_id}"')
 
             # TODO do 2FA with phone number
             # TODO allow only one time verification
@@ -434,7 +442,7 @@ Status: {person['questionnaire']['session_status']}
     def run(self):
 
         mastermind_handler = ConversationHandler(
-            entry_points=[CommandHandler('mastermind', self.mastermind)],
+            entry_points=[CommandHandler('mastermind', self.attendance)],
             states={
                 ATTENDANCE: [MessageHandler(filters.TEXT & ~(filters.COMMAND | filters.Regex("^q$")), self.attendance)],
                 CONFIRMATION: [
