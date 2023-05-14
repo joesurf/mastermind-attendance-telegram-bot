@@ -8,4 +8,19 @@
 5. A test should fail the first time you run it. If it doesn’t ask yourself why you are adding it. 6. Never refactor without tests.
 
 
-ssh -i "the100club-admin.pem" ec2-user@ec2-52-201-240-137.compute-1.amazonaws.comA
+ssh -i "the100club-admin.pem" ec2-user@ec2-52-201-240-137.compute-1.amazonaws.com
+
+
+# Dev Mode
+1. Change blast target 
+
+# Prod Mode
+1. Change group selection
+
+
+# Tests
+1. Context changes
+2. 
+
+# Next steps
+1. Add testing
